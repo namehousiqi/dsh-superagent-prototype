@@ -279,17 +279,22 @@ Policy 版本变化时计算 `policyEffects`，记录哪些 Ticket 已收到通�
 - Outbox 应用飞书聊天词数限制。
 - `src/app/links.ts` 解析飞书消息链接和 `repliedTo`。它和 Runtime 使用 `feishuSettings` 读取设置。
 - `src/app/resources.ts` 读取 `feishu/` 和 `github/` 原始内容；`src/app/cards.ts` 使用 `pullOf` 构造 Ticket 卡片。
-- Runtime 为以 merged 或 closed 结束的 Ticket 发送 `pullEndNotices`。
-- Executor 工具使用 Runtime 暴露的 GitHub 上下文，通过 `readPull` 和 `claimPull` 绑定报告的拉取请求。
-- MasterAssessor 使用 `readRepositoryPath` 读取仓库文件。
-- Sessions 和 Prompts 只为 GitHub 和飞书注册内置技能。迁移会转换它们的 schema-10 记录。
-- Setup 只探测 GitHub 和飞书账号字段（`SETUP_FIELDS`）。只有这两个 Source 通过 `SourceContext.problem` 接收账号设置问题。
+- Runtime 为以 merged 或 closed 结束的 Ticket 发送 `pullEndNotices` 或 `mergeEndNotices`。
+- Executor 工具通过 `readPull` 和 `claimPull` 绑定 GitHub 拉取请求，或通过 `GitlabPublisher` 发布并绑定 GitLab MR。
+- MasterAssessor 从 GitHub 默认分支或配置的 GitLab 开发基准分支读取仓库文件。
+- Sessions 和 Prompts 只为 GitHub 和飞书注册内置技能；GitLab Worker 额外接收不可被团队覆盖的 GitLab 指令。迁移会转换它们的 schema-10 记录。
+- Setup 探测所选 GitHub 或 GitLab 的账号字段以及飞书账号字段（`SETUP_FIELDS`）。
 
 
 ## 模块
 
 | 路径 | 职责 |
 | --- | --- |
+| `src/app/ticket-repository.ts` | 固定 Ticket 仓库、分支和基准提交快照 |
+| `src/executor/gitlab-workspace.ts`、`src/executor/gitlab-push.ts`、`src/executor/gitlab-publish.ts` | GitLab 工作区准备、受控功能分支推送及 MR 发布 |
+| `src/sources/gitlab.ts`、`src/sources/gitlab-merge.ts`、`src/sources/gitlab-channel.ts` | GitLab 来源配置、MR 身份验证和回复 |
+| `src/sources/gitlab-events.ts`、`src/sources/gitlab-poll.ts`、`src/sources/gitlab-pull.ts` | 关联 MR 的评论、流水线和终态跟踪 |
+| `src/sources/gitlab-read.ts` | 在开发基准分支上只读查询研判所需文件和目录 |
 | `src/index.ts` | 主插件入口：读取机器设置、启动 Runtime，并向其提供 Source 账号保存所用的重启回调 |
 | `src/deployment.ts` | 插件 `Config` 和 `Machine`；`resolveDeployment` 和 `resolveFeishuBot` 从 Source 设置读取仓库和账号，CLI 按 Executor shell 的方式运行；`SETUP_FIELDS` 列出设置流程读取的 Source 字段。代码不指定任何人、账号或组织 |
 | `src/setup.ts` | 设置问题：`SetupError` 包含代码、修复位置，以及日志、主 Session 和面板共用的英文文本 |
@@ -397,12 +402,16 @@ Policy 版本变化时计算 `policyEffects`，记录哪些 Ticket 已收到通�
 | `src/client/locales.ts` | 两种语言的全部文案，以及 [001 领域模型](001-domain.md)中的术语表 |
 | `src/client/client.css`, `css.d.ts` | 面板样式表，以文本加载 |
 
-`src/sources/github.ts` 和 `src/sources/feishu.ts` 也是两个 Source 插件的入口，由 `tsdown.config.ts` 构建，并在 `package.json` 中导出为 `./github-watch` 和 `./feishu-watch`。bundle 的 `cordis.patch.yml` 插入三个插件，其中飞书禁用。
+`src/sources/github.ts`、`src/sources/gitlab.ts` 和 `src/sources/feishu.ts` 是三个 Source 插件的入口，由 `tsdown.config.ts` 构建，并在 `package.json` 中分别导出为 `./github-watch`、`./gitlab-watch` 和 `./feishu-watch`。bundle 的 `cordis.patch.yml` 插入 orchestrator 和三个 Source 插件，其中飞书禁用。
 
 ## 测试
 
 | 测试 | 覆盖范围 |
 | --- | --- |
+| `tests/gitlab-read.spec.ts`、`tests/assessment.spec.ts` | GitLab 基准分支的只读研判、分页与路径限制 |
+| `tests/gitlab-runtime.spec.ts` | 模拟飞书工单、GitLab MR 跟踪及终态通知的运行时闭环 |
+| `tests/gitlab-workspace.spec.ts`、`tests/gitlab-publish.spec.ts`、`tests/gitlab-merge.spec.ts` | 隔离工作区、受控推送和 MR 身份校验 |
+| `tests/gitlab-poll.spec.ts`、`tests/gitlab-channel.spec.ts`、`tests/gitlab-events.spec.ts`、`tests/gitlab-pull.spec.ts` | 关联 MR 评论、CI、回复和终态 |
 | `tests/core-engine.spec.ts` | 内存仓库上的领域规则：接收、Eval、扇出、恢复和停止、中断的 Assignment、暂停、Policy 变化、报告和结果、附加、回复、发送失败和已忽略问题 |
 | `tests/stage.spec.ts` | 逐行测试 Ticket 阶段 |
 | `tests/policy.spec.ts` | Source 范围、准入层、准入表、Mandate 重新验证、Policy 版本、设置迁移和研判结果 |

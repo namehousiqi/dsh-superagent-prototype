@@ -46,16 +46,51 @@ export const GithubAccountsSchema = z.object({
   repository: z.string().trim().regex(/^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?$/, 'owner/name').default(''),
   cli: z.string().trim().default(''),
 })
+export const GitlabRepositorySchema = z.object({
+  repository: z.string().trim().default(''),
+  baseBranch: z.string().trim().default(''),
+  targetBranch: z.string().trim().default(''),
+  cli: z.string().trim().default(''),
+}).strict()
 export const FeishuBotSchema = z.object({ cli: z.string().trim().default('') })
 /** Source configuration keys that affect deployment setup and trigger a restart when changed. */
-export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = { github: Object.keys(GithubAccountsSchema.shape), feishu: Object.keys(FeishuBotSchema.shape) }
+export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = {
+  github: Object.keys(GithubAccountsSchema.shape), gitlab: Object.keys(GitlabRepositorySchema.shape), feishu: Object.keys(FeishuBotSchema.shape),
+}
 
-export interface Deployment extends Machine {
+export interface GitHubAgent { cli: string; login: string; noreply: string }
+export interface GitLabProject {
+  cli: string
+  host: string
+  projectId: number
   repository: string
-  github: { cli: string; login: string; noreply: string }
+  webUrl: string
+  cloneUrl: string
+  username: string
+  baseBranch: string
+  targetBranch: string
+}
+export interface Deployment extends Machine {
+  provider: 'github' | 'gitlab'
+  repository: string
+  github?: GitHubAgent
+  gitlab?: GitLabProject
   feishu?: FeishuBot
 }
+export interface GithubDeployment extends Deployment { provider: 'github'; github: GitHubAgent }
+export interface GitlabDeployment extends Deployment { provider: 'gitlab'; gitlab: GitLabProject }
 export interface FeishuBot { cli: string; appId: string; brand: 'feishu' | 'lark'; botId: string; name: string }
+
+/** Reject GitHub operations when the instance uses another repository provider. */
+export function githubAgent(deployment: Pick<Deployment, 'github'>): GitHubAgent {
+  if (!deployment.github) throw new Error('GitHub is not the selected repository provider')
+  return deployment.github
+}
+/** Reject GitLab operations when the instance uses another repository provider. */
+export function gitlabProject(deployment: Pick<Deployment, 'gitlab'>): GitLabProject {
+  if (!deployment.gitlab) throw new Error('GitLab is not the selected repository provider')
+  return deployment.gitlab
+}
 
 /** Resolve a command name or absolute path to an executable file, ignoring the worker shim directory. */
 export function executable(name: string, path: string, exclude?: string): string {
@@ -84,7 +119,7 @@ function parsed<T>(schema: z.ZodType<T>, text: string): T | undefined {
   return result.success ? result.data : undefined
 }
 /** Verify the agent's GitHub CLI identity and push access to the configured repository. */
-export async function resolveDeployment(machine: Machine, github: unknown, probe: Probe, path = process.env.PATH ?? ''): Promise<Deployment> {
+export async function resolveDeployment(machine: Machine, github: unknown, probe: Probe, path = process.env.PATH ?? ''): Promise<GithubDeployment> {
   const { stateDir } = machine
   const accounts = GithubAccountsSchema.parse(github ?? {})
   const remote = accounts.repository
@@ -95,14 +130,74 @@ export async function resolveDeployment(machine: Machine, github: unknown, probe
   const text = await probe([cli, 'api', 'user']).catch((error: unknown) => { throw new SetupError('agentCliSignedOut', { output: reason(error) }) })
   const agent = parsed(GithubUser, text)
   if (!agent) throw new SetupError('agentCliNoAccount')
-  // Use the canonical repository name returned by GitHub so renamed repositories match incoming notifications.
   const access = parsed(RepositoryAccess, await probe([cli, 'api', `repos/${remote}`, '--jq', '{name: .full_name, push: .permissions.push}']).catch((error: unknown) => {
     throw new SetupError('repositoryUnreadable', { account: agent.login, repository: remote, output: reason(error) })
   }))
   if (!access) throw new SetupError('repositoryUnreported', { repository: remote })
   const repository = access.name
   if (access.push !== true) throw new SetupError('repositoryReadOnly', { account: agent.login, repository })
-  return { ...machine, repository, github: { cli, login: agent.login, noreply: `${agent.id}+${agent.login}@users.noreply.github.com` } }
+  return { ...machine, provider: 'github', repository, github: { cli, login: agent.login, noreply: `${agent.id}+${agent.login}@users.noreply.github.com` } }
+}
+
+const GitLabUser = z.object({ username: z.string().min(1), id: z.number().int().positive() })
+const GitLabProjectResponse = z.object({ id: z.number().int().positive(), path_with_namespace: z.string().min(3), web_url: z.string().url(),
+  http_url_to_repo: z.string().url(), default_branch: z.string().min(1).nullish(), can_create_merge_request_in: z.boolean().optional() })
+const GitLabBranch = z.object({ name: z.string().min(1) })
+/** Parse a project URL without accepting embedded credentials, non-HTTPS protocols or web-page paths. */
+export function parseGitLabRepository(value: string): { host: string; path: string } {
+  let url: URL
+  try { url = new URL(value) } catch { throw new SetupError('gitlabRepositoryInvalid') }
+  if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) throw new SetupError('gitlabRepositoryInvalid')
+  const path = url.pathname.replace(/\.git\/?$/, '').replace(/\/$/, '').replace(/^\//, '')
+  const parts = path.split('/')
+  if (parts.length < 2 || parts.some(part => !/^[A-Za-z0-9_.-]+$/.test(part) || part === '.' || part === '..' || part === '-')) {
+    throw new SetupError('gitlabRepositoryInvalid')
+  }
+  return { host: url.host, path }
+}
+/** Resolve a self-managed GitLab project, identity, and explicitly configured development/merge target branches. */
+export async function resolveGitLab(machine: Machine, input: unknown, probe: Probe, path = process.env.PATH ?? ''): Promise<GitlabDeployment> {
+  const config = GitlabRepositorySchema.parse(input ?? {})
+  if (!config.repository) throw new SetupError('gitlabRepositoryUnset')
+  if (!config.cli) throw new SetupError('gitlabCliUnset')
+  if (!config.baseBranch || !config.targetBranch) throw new SetupError('gitlabBranchesUnset')
+  const wanted = parseGitLabRepository(config.repository)
+  let cli: string
+  try { cli = executable(config.cli, path, workerBin(machine.stateDir)) } catch (error) { throw new SetupError('gitlabCliMissing', { output: reason(error) }) }
+  const invoke = (endpoint: string) => probe([cli, 'api', endpoint, '--hostname', wanted.host])
+  // Do not echo CLI stderr, which may contain authentication material from a misconfigured wrapper.
+  const failed = (error: unknown): never => {
+    const status = /\bHTTP\s+(\d{3})\b|\b(\d{3})\s+Not Found\b/i.exec(reason(error))
+    throw new SetupError('gitlabCliFailed', status ? { output: `HTTP ${status[1] ?? status[2]}` } : {})
+  }
+  const account = parsed(GitLabUser, await invoke('/user').catch(failed))
+  if (!account) throw new SetupError('gitlabCliSignedOut')
+  const project = parsed(GitLabProjectResponse, await invoke(`/projects/${encodeURIComponent(wanted.path)}`).catch(failed))
+  if (!project) throw new SetupError('gitlabRepositoryUnreadable', { repository: config.repository })
+  const canonical = { host: wanted.host, path: project.path_with_namespace.toLowerCase() }
+  const matches = (value: string): boolean => {
+    try {
+      const got = parseGitLabRepository(value)
+      return got.host === canonical.host && got.path.toLowerCase() === canonical.path
+    } catch { return false }
+  }
+  if (wanted.path.toLowerCase() !== canonical.path || !matches(project.web_url) || !matches(project.http_url_to_repo)) {
+    throw new SetupError('gitlabRepositoryMismatch')
+  }
+  if (project.can_create_merge_request_in === false) throw new SetupError('gitlabMergeRequestForbidden')
+  const branch = async (name: string, missing: 'gitlabBaseBranchMissing' | 'gitlabTargetBranchMissing'): Promise<void> => {
+    const result = await invoke(`/projects/${project.id}/repository/branches/${encodeURIComponent(name)}`).catch((error: unknown) => {
+      if (/\bHTTP\s+404\b|\b404\s+Not Found\b/i.test(reason(error))) throw new SetupError(missing, { branch: name })
+      return failed(error)
+    })
+    const found = parsed(GitLabBranch, result)
+    if (!found || found.name !== name) throw new SetupError(missing, { branch: name })
+  }
+  await branch(config.baseBranch, 'gitlabBaseBranchMissing')
+  if (config.targetBranch !== config.baseBranch) await branch(config.targetBranch, 'gitlabTargetBranchMissing')
+  return { ...machine, provider: 'gitlab', repository: project.path_with_namespace,
+    gitlab: { cli, host: wanted.host, projectId: project.id, repository: project.path_with_namespace, webUrl: project.web_url,
+      cloneUrl: project.http_url_to_repo, username: account.username, baseBranch: config.baseBranch, targetBranch: config.targetBranch } }
 }
 
 const AuthStatus = z.object({ appId: z.string().regex(/^cli_[A-Za-z0-9]+$/), brand: z.enum(['feishu', 'lark']).default('feishu'), identities: z.object({ bot: z.object({ status: z.string() }) }) })

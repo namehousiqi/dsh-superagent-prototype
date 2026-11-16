@@ -34,7 +34,8 @@ function harness(policyOverrides: Partial<Policy> = {}, { emit, prepareTicket }:
     ...policyOverrides,
   }
   let clock = 0
-  const scope: EngineOptions['scope'] = { scope: t => t.meta.blocked ? { listened: false, reason: 'chat not allowed' } : { listened: true, observed: false } }
+  const scope: EngineOptions['scope'] = { scope: t => t.meta.blocked ? { listened: false, reason: 'chat not allowed' }
+    : t.meta.followupOnly ? { listened: true, observed: false, followupOnly: true } : { listened: true, observed: false } }
   const queued: EngineOptions['outbox'] = {
     send: message => { if (!outbox.some(item => item.id === message.id)) outbox.push(message) },
     status: id => outbox.some(item => item.id === id) ? 'pending' : undefined,
@@ -79,6 +80,19 @@ describe('intake', () => {
     expect(h.engine.receive(trigger('2', { meta: { blocked: true } }))).toBe('filtered')
     expect(h.repo.triggers.disposition('2')?.filtered).toEqual({ code: 'chat not allowed' })
     expect(h.repo.threads.get('chat:t1')?.pending).toEqual(['1'])
+  })
+  it('delivers followup-only events to their ticket but never queues a new evaluation', () => {
+    const h = harness()
+    const decision = accepted(h)
+    const id = decision.ticketId!
+    h.engine.bindThread(id, { source: 'gitlab', id: 'project:7' }, true)
+    const note = trigger('2', { source: 'gitlab', threads: [{ source: 'gitlab', id: 'project:7' }], meta: { followupOnly: true } })
+    h.engine.receive(note)
+    expect(h.repo.tickets.get(id)!.inputs.some(input => input.kind === 'trigger' && input.triggerId === '2')).toBe(true)
+    expect(h.engine.handback(id, '2', 'Not part of this ticket')).toBe(false)
+    expect(h.repo.threads.get('gitlab:project:7')?.pending).toEqual([])
+    h.engine.receive(trigger('3', { source: 'gitlab', threads: [{ source: 'gitlab', id: 'unbound' }], meta: { followupOnly: true } }))
+    expect(h.repo.threads.get('gitlab:unbound')?.pending).toEqual([])
   })
   it('records correlation for a trigger on several threads and evaluates only on the primary one', () => {
     const h = harness()

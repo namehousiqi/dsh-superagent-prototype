@@ -8,7 +8,7 @@ import { SENSITIVE_ENV_PATTERN, type SubprocessRuntime } from '@deepseek-ai/dsh-
 import { GIT_LOCATION, agentVariables, credentialHelper, runAsWorker, verifyDirectory, withoutDirectory, workerBin, workerGitConfig, writeEnvironment }
   from '../src/infra/environment.ts'
 import { CliError } from '../src/infra/commands.ts'
-import { testDeployment } from './fixtures/deployment.ts'
+import { testDeployment, testGitlabDeployment } from './fixtures/deployment.ts'
 import { gitEnv } from './fixtures/git.ts'
 
 // Git and shell subprocesses can exceed the 5s default timeout when the test suite runs in parallel.
@@ -94,6 +94,28 @@ describe('agent git configuration', () => {
     await git('-C', 'repo', '-c', 'user.name=Alice', '-c', 'user.email=alice@example.com', 'commit', '--allow-empty', '-q', '-m', 'with identity')
     expect(await git('-C', 'repo', 'log', '-1', '--format=%an <%ae> / %cn <%ce>')).toBe('Alice <alice@example.com> / Alice <alice@example.com>')
   })
+})
+
+it('isolates the GitLab wrapper and supplies credentials only for its configured HTTPS host', async () => {
+  const wrapper = program(join(dir, 'glab-agent'), `case "$*" in
+  "auth git-credential get") printf 'username=gitlab-ci-token\\npassword=fixture-password\\n\\n' ;;
+  *) echo wrapper "$@" ;;
+esac`)
+  const deployment = testGitlabDeployment({ stateDir: dir, gitlab: { ...testGitlabDeployment().gitlab, cli: wrapper } })
+  await writeEnvironment(deployment, [])
+  const env = workerEnv({ PATH: [workerBin(dir), '/usr/bin', '/bin'].join(':'), HOME: dir,
+    GITLAB_TOKEN: 'operator-token', GLAB_SKIP_TLS_VERIFY: 'true', ...agentVariables(dir) })
+  expect(env).not.toHaveProperty('GITLAB_TOKEN')
+  expect(env.GLAB_SKIP_TLS_VERIFY).toBe('false')
+  expect((await exec('glab', ['api', '/user'], { cwd: dir, env })).stdout.trim()).toBe('wrapper api /user')
+  await expect(exec('gh', ['api', 'user'], { cwd: dir, env })).rejects.toMatchObject({ stderr: expect.stringContaining('unavailable') })
+  const fill = (host: string) => {
+    const child = exec('git', ['credential', 'fill'], { cwd: dir, env })
+    child.child.stdin?.end(`protocol=https\nhost=${host}\n\n`)
+    return child
+  }
+  expect((await fill('git.example.test')).stdout).toContain('password=fixture-password')
+  await expect(fill('elsewhere.test')).rejects.toMatchObject({ stderr: expect.stringContaining('terminal prompts disabled') })
 })
 
 it('fails instead of asking the operator\'s askpass helpers when the agent\'s credential helper has no answer', async () => {

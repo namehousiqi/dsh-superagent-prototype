@@ -42,6 +42,14 @@ export interface PromptVersion { revision: number; previousRevision: number | nu
 export const defaultPrompts = (): PromptConfig => ({ ...teamDefaults, skills: {} })
 
 const ENVIRONMENT_HEADING = 'Execution environment (from this installation\'s settings; it takes precedence over any repository or account named elsewhere in these instructions; an empty value means that part is not configured here). The prepare command of a ticket directory reads the same variables:'
+const GITLAB_WORKER_RULES = 'GitLab Ticket rules (take precedence over conflicting GitHub, PR, or team delivery instructions): '
+  + 'Work only in the fixed Ticket repository and feature branch named above, from its fixed base SHA. '
+  + 'Set the Git commit identity explicitly to the dedicated GitLab agent account and its verified or approved no-reply email; do not use the operator identity. If its commit email cannot be established, report blocked. '
+  + 'Never push with git, create or update an MR with glab or another client, enable auto-merge, merge, close an MR, or write to the base or target branch. '
+  + 'After committing and verification, call orchestrator_gitlab_publish to push this Ticket branch and create or reuse its MR; retry if GitLab has not yet confirmed its head. '
+  + 'The tool binds the MR; do not report pr_number for GitLab. Inspect the entire MR diff against the target and disclose changes outside this Ticket, especially when base and target differ. '
+  + 'A person merges the MR. Report the actual MR URL and evidence with orchestrator_report; follow MR review and CI inputs from the host. '
+  + 'Do not rewrite published commits or use the GitHub reviewer-credit and auto-merge procedures. Keep all credentials and private Feishu content out of the MR.'
 const POLICY_HEAD = '## Policy\nPolicy version {version}; accept mode {mode}. The accept mode and the rules decide proactive candidates only: an explicit request is routed as dispatch says, in any mode and whatever the rules.'
 type Role = 'orchestrator' | 'worker'
 /** A built-in part a team may override: the roles that read it, its text, and the placeholders a template's override keeps. */
@@ -135,12 +143,14 @@ export class PromptConflict extends Error {}
 export class Prompts {
   private readonly versions: Versions<PromptVersion>
   constructor(private readonly store: Store, private readonly maxChars: () => number, private readonly environment: () => Variable[] | undefined,
-    private readonly feishu: () => boolean) {
+    private readonly feishu: () => boolean, private readonly provider: () => 'github' | 'gitlab' = () => 'github') {
     this.versions = new Versions(store, KV.prompts.revision, KV.prompts.version)
   }
   /** A role's prompt; the main Session's Policy section follows the settings as they are now, at each model request. */
   compose(config: PromptConfig, role: Role, variables = this.environment()): string {
-    return composePrompt(config, role, environmentSection(config, variables), role === 'orchestrator' ? policySection(this.store.settings(), config) : undefined)
+    const environment = environmentSection(config, variables)
+    const scoped = role === 'worker' && this.provider() === 'gitlab' ? `${environment}\n${GITLAB_WORKER_RULES}` : environment
+    return composePrompt(config, role, scoped, role === 'orchestrator' ? policySection(this.store.settings(), config) : undefined)
   }
   /** Returns skills to register in every Session: built-in Source skills (`feishu` only when a Feishu bot is configured) followed by team skills. */
   skills(config: PromptConfig): [string, string][] {
@@ -195,8 +205,9 @@ export class Prompts {
   preview(value: unknown) {
     const config = this.validate(value)
     const environment = environmentSection(config, this.environment()), policy = policySection(this.store.settings(), config)
-    return { orchestrator: composePrompt(config, 'orchestrator', environment, policy), worker: composePrompt(config, 'worker', environment),
-      parts: { orchestrator: promptParts(config, 'orchestrator', environment, policy), worker: promptParts(config, 'worker', environment) },
+    const workerEnvironment = this.provider() === 'gitlab' ? `${environment}\n${GITLAB_WORKER_RULES}` : environment
+    return { orchestrator: composePrompt(config, 'orchestrator', environment, policy), worker: composePrompt(config, 'worker', workerEnvironment),
+      parts: { orchestrator: promptParts(config, 'orchestrator', environment, policy), worker: promptParts(config, 'worker', workerEnvironment) },
       skills: Object.fromEntries(this.skills(config)), scope: 'Team sections, skills, and overrides of built-in parts, which follow their built-in text until overridden. Workers additionally inherit the host prompt and repository AGENTS.md. Prompt text changes what the agents are told, not what dsh-superagent allows: tool permissions, the gate and account wrappers stay.' }
   }
   save(value: unknown, baseRevision: number, source: SettingsOrigin): PromptVersion {

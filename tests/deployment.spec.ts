@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { Config, executable, machineOf, resolveDeployment, resolveFeishuBot, type Machine, type Probe } from '../src/deployment.ts'
+import { Config, executable, machineOf, parseGitLabRepository, resolveDeployment, resolveFeishuBot, resolveGitLab, type Machine, type Probe } from '../src/deployment.ts'
 import { gitEnv } from './fixtures/git.ts'
 
 const exec = promisify(execFile)
@@ -97,5 +97,49 @@ describe('setup', () => {
     await refuses('feishuNoBot')
     program(join(dir, 'bin', 'lark-cli'), 'echo "not configured" >&2; exit 1')
     await refuses('feishuCliFailed', { output: expect.stringContaining('not configured') })
+  })
+})
+
+describe('self-hosted GitLab setup', () => {
+  const repository = 'https://git.example.test/team/sub/project.git'
+  const config = { repository, cli: 'glab-agent', baseBranch: 'develop/next', targetBranch: 'release' }
+  const project = { id: 42, path_with_namespace: 'team/sub/project', web_url: 'https://git.example.test/team/sub/project',
+    http_url_to_repo: repository, default_branch: 'main', can_create_merge_request_in: true }
+  const response = (override: Partial<typeof project> = {}): Probe => async argv => {
+    if (argv[1] !== 'api' || argv[3] !== '--hostname' || argv[4] !== 'git.example.test') throw new Error('unexpected CLI request')
+    if (argv[2] === '/user') return JSON.stringify({ id: 7, username: 'agent' })
+    if (argv[2] === '/projects/team%2Fsub%2Fproject') return JSON.stringify({ ...project, ...override })
+    if (argv[2] === '/projects/42/repository/branches/develop%2Fnext') return JSON.stringify({ name: 'develop/next' })
+    if (argv[2] === '/projects/42/repository/branches/release') return JSON.stringify({ name: 'release' })
+    throw new Error('HTTP 404')
+  }
+  beforeEach(() => { program(join(dir, 'bin', 'glab-agent')) })
+  it('accepts a credential-free HTTPS URL and nested project path without its .git suffix', () => {
+    expect(parseGitLabRepository(repository)).toEqual({ host: 'git.example.test', path: 'team/sub/project' })
+    for (const url of ['http://git.example.test/team/project', 'https://user:secret@git.example.test/team/project',
+      'https://git.example.test/team/project?token=secret', 'https://git.example.test/team/project#section',
+      'https://git.example.test/project', 'https://git.example.test/team/project/-/tree/main']) {
+      expect(() => parseGitLabRepository(url)).toThrow()
+    }
+  })
+  it('resolves the configured project, account and two independent branches without consulting GitHub', async () => {
+    const calls = vi.fn(response())
+    const deployment = await resolveGitLab(machine(), config, calls, path)
+    expect(deployment).toMatchObject({ provider: 'gitlab', repository: 'team/sub/project', gitlab: {
+      cli: join(dir, 'bin', 'glab-agent'), host: 'git.example.test', projectId: 42, username: 'agent',
+      baseBranch: 'develop/next', targetBranch: 'release', cloneUrl: repository,
+    } })
+    expect(deployment.github).toBeUndefined()
+    expect(calls).toHaveBeenCalledTimes(4)
+  })
+  it('rejects missing branches, a different project origin, and an account that cannot open MRs', async () => {
+    await expect(resolveGitLab(machine(), { ...config, targetBranch: '' }, response(), path))
+      .rejects.toEqual(setupError('gitlab', 'gitlabBranchesUnset'))
+    await expect(resolveGitLab(machine(), config, response({ http_url_to_repo: 'https://elsewhere.test/team/sub/project.git' }), path))
+      .rejects.toEqual(setupError('gitlab', 'gitlabRepositoryMismatch'))
+    await expect(resolveGitLab(machine(), config, response({ can_create_merge_request_in: false }), path))
+      .rejects.toEqual(setupError('gitlab', 'gitlabMergeRequestForbidden'))
+    const missing: Probe = async argv => argv[2]?.endsWith('/release') ? Promise.reject(new Error('HTTP 404')) : response()(argv)
+    await expect(resolveGitLab(machine(), config, missing, path)).rejects.toEqual(setupError('gitlab', 'gitlabTargetBranchMissing', { branch: 'release' }))
   })
 })

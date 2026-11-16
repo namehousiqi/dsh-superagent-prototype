@@ -2,6 +2,14 @@
 
 Use this guide to install, configure and operate dsh-superagent. It covers accounts, startup checks, upgrades and troubleshooting, building on [001 Domain model](001-domain.md) through [005 Panel](005-panel.md).
 
+## GitLab repository
+
+GitHub remains the default. For a self-managed GitLab project, enable the Feishu plugin and configure its bot and allowed senders, then enable the GitLab Source in the panel. Set its HTTPS repository URL (without embedded credentials), an agent `glab` CLI or wrapper, a development base branch, and an MR target branch. Choose GitLab as the repository source in Execution settings. Both branches must already exist; no repository or branch is prefilled. Use a dedicated account with project read access and permission to push Ticket branches and create MRs. Configure its `glab` authentication separately, retain TLS certificate verification, and never put a token in the URL, panel settings or prompts.
+
+A new Feishu Ticket fixes its repository and branches at acceptance. The host clones its own Ticket directory and creates an `agent/` branch from the configured base, recording the base commit. GitLab does not use the GitHub prepare command. Publication pushes that branch and creates or reuses its MR against the configured target. The published result includes comparisons against the target commit, including the development base; an incomplete or unavailable comparison requires further inspection. The host follows only bound MRs, including comments, matching-head pipelines and merged/closed state. GitLab Issues and unrelated MRs do not initiate work. The MR is for a person to merge. Setup checks project and branch read access, but does not push or create an MR to prove write permissions; a permission failure is reported when publication is attempted.
+
+The worker runs as the operator and these instructions and wrappers are not a security sandbox. Use a dedicated OS account and restricted GitLab permissions, including protected base/target branches; do not rely on prompts alone to prevent direct commands. Repository or provider changes require all Tickets to be closed, and a missing or mismatched GitLab Ticket snapshot prevents that Ticket from starting. Once a configured GitHub repository is changed after snapshot support is installed, legacy Tickets without snapshots cannot resume; changes before the upgrade cannot be reliably reconstructed from those records. See the GitHub-specific instructions below when using GitHub.
+
 ## What runs
 
 - **A dedicated DeepSeek Harness profile**, called `superagent` in this guide. Create it from the Web profile template. It loads the bundle and serves its panel on `127.0.0.1`. Keep it separate from the profile you work in: the plugin changes process-wide `PATH` and git settings, and its process needs independent restarts and upgrades.

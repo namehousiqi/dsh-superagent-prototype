@@ -93,6 +93,24 @@ it('renders each Source\'s settings from its kind\'s fields and saves one Source
   expect(server.revisions['source:github']).toBe(6)
 })
 
+it('configures a GitLab repository and independent base and target branches without defaults', async () => {
+  server.includeGitlab = true
+  await mount()
+  await click(tab(zh['tab.settings']))
+  const card = all('.dt-card').find(item => item.textContent?.includes('GitLab'))!
+  expect(card).toBeTruthy()
+  expect(field<HTMLInputElement>('仓库 HTTPS 地址').value).toBe('')
+  expect(field<HTMLInputElement>('开发基准分支').value).toBe('')
+  expect(field<HTMLInputElement>('MR 目标分支').value).toBe('')
+  await type(field<HTMLInputElement>('仓库 HTTPS 地址'), 'https://git.example.test/team/product.git')
+  await type(field<HTMLInputElement>('开发基准分支'), 'develop')
+  await type(field<HTMLInputElement>('MR 目标分支'), 'release')
+  await type(field<HTMLInputElement>('智能体的 GitLab CLI'), '/opt/bin/glab-agent')
+  await act(async () => { card.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })) }); await settle()
+  expect(server.settings.sources.gitlab).toMatchObject({ enabled: true, config: { repository: 'https://git.example.test/team/product.git',
+    baseBranch: 'develop', targetBranch: 'release', cli: '/opt/bin/glab-agent' } })
+})
+
 it('shows the account each CLI signs in as, and keeps a saved CLI on screen while dsh-superagent restarts', async () => {
   await mount()
   await click(tab(zh['tab.settings']))

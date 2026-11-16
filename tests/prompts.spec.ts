@@ -57,6 +57,22 @@ it('assembles every role from fixed sections around the team sections, whatever 
   expect(composePrompt(config, 'worker')).not.toContain(mainAdmissionPolicy)
 })
 
+it('adds mandatory GitLab worker rules after overridden delivery instructions, without changing GitHub prompts', () => {
+  withStore(store => {
+    const gitlab = new Prompts(store, () => 100000, variables, () => true, () => 'gitlab')
+    const github = new Prompts(store, () => 100000, variables, () => true, () => 'github')
+    const config = { ...defaultPrompts(), delivery: 'Enable auto-merge for PRs.' }
+    const worker = gitlab.compose(config, 'worker')
+    expect(worker).toContain('Enable auto-merge for PRs.')
+    expect(worker).toContain('GitLab Ticket rules (take precedence')
+    expect(worker).toContain('Never push with git')
+    expect(worker).toContain('orchestrator_gitlab_publish')
+    expect(gitlab.preview(config).worker).toBe(worker)
+    expect(github.compose(config, 'worker')).not.toContain('GitLab Ticket rules')
+    expect(gitlab.compose(config, 'orchestrator')).not.toContain('GitLab Ticket rules')
+  })
+})
+
 it('reads a prompt file whatever its line ends and blank lines, and names a missing or empty one', () => {
   const dir = mkdtempSync(join(tmpdir(), 'prompt-file-'))
   // promptFile resolves paths relative to prompts/; use a relative path to reach the temp dir.

@@ -6,19 +6,21 @@ import { mainAdmissionPolicy } from '../src/app/context.ts'
 import { Engine, MemoryRepositories, type Executor, type Policy, type Trigger } from '../src/core/index.ts'
 import type { Commands } from '../src/infra/commands.ts'
 import { SettingsSchema } from '../src/policy.ts'
-import { testDeployment } from './fixtures/deployment.ts'
+import { testDeployment, testGitlabDeployment } from './fixtures/deployment.ts'
+import type { Deployment } from '../src/deployment.ts'
 import { deferred } from './fixtures/async.ts'
 import { githubKind } from '../src/sources/github.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
 
 /** Assessor fixture backed by in-memory repositories and fake GitHub Issue and file reads. */
 function setup(strength: 'explicit' | 'inferred' = 'inferred', bodies = Array.from({ length: 5 }, (_, i) => `comment ${i}`),
-  threadContext?: AssessorHost['threadContext']) {
+  threadContext?: AssessorHost['threadContext'], deployment: Deployment = testDeployment()) {
   const comments = bodies.map((body, i) => ({ id: i, html_url: `https://github.com/acme/widgets/issues/1#c${i}`,
     user: { login: 'bob' }, created_at: '2026-09-09T00:00:00Z', body }))
   const gate = { issue: undefined as Promise<void> | undefined }
   const commands = {
-    repository: 'acme/widgets', deployment: testDeployment(),
+    repository: deployment.repository, deployment,
+    gitlabApi: vi.fn(),
     withSignal() { return commands },
     gh: vi.fn(async (args: string[]) => {
       await gate.issue
@@ -37,7 +39,7 @@ function setup(strength: 'explicit' | 'inferred' = 'inferred', bodies = Array.fr
   sources.register(githubKind)
   let engine!: Engine
   const host: AssessorHost = {
-    get engine() { return engine }, commands, deployment: testDeployment(), settings: () => SettingsSchema.parse({}),
+    get engine() { return engine }, commands, deployment, settings: () => SettingsSchema.parse({}),
     threadContext: threadContext ?? (trigger => sources.threadContext(trigger)),
     effects: { enqueue: () => {}, handle: () => {} }, paused: () => false, deliver: async () => {}, candidateCard: async candidate => ({ eval_id: candidate.evalId }),
   }
@@ -57,11 +59,24 @@ function setup(strength: 'explicit' | 'inferred' = 'inferred', bodies = Array.fr
   // Per-Eval state retained by the assessor and released when the Eval ends.
   const kept = assessor as unknown as { evals: Map<string, unknown> }
   const size = () => kept.evals.size
-  return { repo, engine, assessor, tools, size, gate }
+  return { repo, engine, assessor, tools, size, gate, commands }
 }
 const issue = (n: number): Trigger => ({ id: `issue-${n}`, source: 'github', threads: [{ source: 'github', id: String(n) }], actor: { source: 'github', id: 'bob' }, human: true,
   at: new Date(Date.UTC(2026, 8, 9, 0, 0, n)).toISOString(), text: `issue ${n}`, url: `https://github.com/acme/widgets/issues/${n}`, meta: { number: n } })
 const signal = new AbortController().signal
+
+it('reads GitLab assessment files on the configured development base branch', async () => {
+  const s = setup('inferred', undefined, undefined, testGitlabDeployment())
+  const api = vi.mocked(s.commands.gitlabApi)
+  api.mockImplementation(async (schema, path) => schema.parse(path === 'repository/tree'
+    ? [{ id: 'a'.repeat(40), name: 'value.ts', type: 'blob' }]
+    : { encoding: 'base64', content: Buffer.from('export const value = 1\n').toString('base64') }))
+  s.engine.receive(issue(1)); s.engine.evaluateDue()
+  const result = await s.tools.orchestrator_eval_read!({ trigger_id: 'issue-1', resource: 'file', path: 'src/value.ts', offset: 0 }, signal)
+  expect(result).toMatchObject({ text: 'export const value = 1\n' })
+  expect(api).toHaveBeenCalledWith(expect.anything(), 'repository/tree', { query: { ref: 'develop', path: 'src', per_page: '100', page: '1' } })
+  expect(api).toHaveBeenCalledWith(expect.anything(), `repository/blobs/${'a'.repeat(40)}`)
+})
 
 it('keeps nothing for an Eval once it is decided, as for one that timed out', async () => {
   const s = setup()

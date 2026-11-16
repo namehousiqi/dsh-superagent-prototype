@@ -6,6 +6,8 @@ import type { PromptVersion } from './app/prompts.ts'
 import type { SettingsVersion } from './app/store.ts'
 import type { SettingsSave } from './policy.ts'
 import type { Retry } from './sources/github.ts'
+import type { TicketRepository } from './app/ticket-repository.ts'
+import type { PushState } from './executor/gitlab-push.ts'
 
 /** Key of a KV record whose value has type `V`; a plain string represents an untyped key. */
 export type Key<V> = string & { readonly __value?: V }
@@ -31,6 +33,12 @@ export const KV = {
     builtIn: family<string, [base: string]>('prompt-built-in:') },
   /** Runtime: the main Session's ID. */
   runtime: { masterId: record<string>('master-id') },
+  /** Repository and branch identity fixed when a Ticket is accepted. */
+  ticketRepository: family<TicketRepository, [ticketId: string]>('ticket-repository:'),
+  /** A configured GitHub repository has changed since Ticket snapshots were introduced. */
+  legacy: { repositoryChanged: record<boolean>('legacy-repository-changed') },
+  gitlab: { ci: family<{ fingerprint: string; revision: number }, [thread: string]>('gitlab-ci:'),
+    push: family<PushState, [ticketId: string]>('gitlab-push:') },
   /** Sessions: prompt revisions each Session has worked under, ordered oldest first; the last entry (`.at(-1)`) is its active revision. */
   sessions: { prompts: family<number[], [session: string]>('session-prompts:') },
   /** Schema 11 migration: legacy main-Session queues imported into the effect table. */

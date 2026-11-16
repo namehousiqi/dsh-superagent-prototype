@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process'
 import { basename } from 'node:path'
 import { promisify } from 'node:util'
 import { z } from 'zod'
-import type { Deployment } from '../deployment.ts'
+import { githubAgent, gitlabProject, type Deployment } from '../deployment.ts'
 
 const exec = promisify(execFile)
 const TIMEOUT_MS = 90_000
@@ -73,7 +73,7 @@ export class Commands {
     } catch (error) { throw commandError(error, program) }
   }
   /** Runs the agent's GitHub CLI and parses its JSON output; callers should prefer `api`, which is restricted to the configured repository and validates output. */
-  async gh<T>(args: string[]): Promise<T> { return JSON.parse(await this.run(this.deployment.github.cli, args)) as T }
+  async gh<T>(args: string[]): Promise<T> { return JSON.parse(await this.run(githubAgent(this.deployment).cli, args)) as T }
   /**
    * Calls the GitHub API on a path within the configured repository, validating JSON output when a schema is provided
    * or returning raw CLI output (such as raw files or `--include` headers) when omitted.
@@ -82,9 +82,26 @@ export class Commands {
   async api<T>(schema: z.ZodType<T>, path: string, ...flags: string[]): Promise<T>
   async api(path: string, ...flags: string[]): Promise<string>
   async api<T>(schema: z.ZodType<T> | string, ...rest: string[]): Promise<T | string> {
-    if (typeof schema === 'string') return this.run(this.deployment.github.cli, ['api', this.path(schema), ...rest])
+    if (typeof schema === 'string') return this.run(githubAgent(this.deployment).cli, ['api', this.path(schema), ...rest])
     const [path = '', ...flags] = rest
     return schema.parse(await this.gh(['api', this.path(path), ...flags]))
+  }
+  /** GitLab REST requests always address the resolved project and cannot override its host or project ID. */
+  async gitlabApi<T>(schema: z.ZodType<T>, path: string, options: { method?: 'POST' | 'PUT'; query?: Record<string, string>; fields?: Record<string, string> } = {}): Promise<T> {
+    if (!/^[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/.test(path)) throw new Error('GitLab calls are restricted to the configured project')
+    const project = gitlabProject(this.deployment)
+    const query = new URLSearchParams(options.query).toString()
+    const endpoint = `/projects/${project.projectId}/${path}${query ? `?${query}` : ''}`
+    const flags = [...options.method ? ['--method', options.method] : [],
+      ...Object.entries(options.fields ?? {}).flatMap(([key, value]) => ['--raw-field', `${key}=${value}`])]
+    let output: string
+    try { output = await this.run(project.cli, ['api', endpoint, '--hostname', project.host, ...flags]) }
+    catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') throw error
+      const code = error instanceof CliError ? error.code : undefined
+      throw new CliError(code ? `GitLab API request failed (HTTP ${code})` : 'GitLab API request failed', code)
+    }
+    return schema.parse(JSON.parse(output))
   }
   /** Fetches all pages of a GitHub API list within the configured repository, skipping items that fail schema validation. */
   async pages<T>(item: z.ZodType<T>, path: string, tally?: Tally): Promise<T[]> {

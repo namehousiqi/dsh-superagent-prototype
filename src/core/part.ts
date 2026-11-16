@@ -55,6 +55,8 @@ export abstract class EnginePart {
   }
   /** Queue a Trigger on its primary Thread for the next Eval, unless it waits there already or an Eval holds it. */
   protected queueForEval(trigger: Trigger): boolean {
+    const scope = this.options.scope.scope(trigger)
+    if (scope.listened && scope.followupOnly) return false
     const primary = this.thread(trigger.threads[0]!)
     if (primary.pending.includes(trigger.id) || primary.evaluating?.triggerIds.includes(trigger.id)) return false
     primary.pending.push(trigger.id)

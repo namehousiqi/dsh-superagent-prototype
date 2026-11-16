@@ -7,7 +7,10 @@ import { dirname, join } from 'node:path'
 import { key, latestAssignment, latestReport, liveTicket, runningAssignment, threadKey, waitsForPerson } from '../core/index.ts'
 import type { AssessmentOutcome, Assignment, EngineForExecutor, Execution, Executor, Mandate, PolicyEffect, Ticket, TicketInput, Trigger }
   from '../core/index.ts'
-import type { Machine } from '../deployment.ts'
+import type { Deployment, Machine } from '../deployment.ts'
+import { KV } from '../kv.ts'
+import { canUseTicketRepository } from '../app/ticket-repository.ts'
+import { prepareGitlabWorkspace, verifyGitlabWorkspace } from './gitlab-workspace.ts'
 import { runAsWorker, verifyDirectory } from '../infra/environment.ts'
 import type { Settings } from '../policy.ts'
 import type { Store } from '../app/store.ts'
@@ -62,7 +65,9 @@ export interface ExecutorHost {
   /** Where the Executor reports what happened to Assignments and Inputs. */
   readonly engine: Pick<EngineForExecutor, 'assignmentStarted' | 'inputsDelivered' | 'inputsRead' | 'turnEnded' | 'deliveryFailed' | 'report'
     | 'assignmentInterrupted'>
-  readonly store: Pick<Store, 'tickets' | 'triggers' | 'set' | 'settings' | 'atomic' | 'afterCommit'>
+  readonly store: Pick<Store, 'tickets' | 'triggers' | 'get' | 'set' | 'settings' | 'atomic' | 'afterCommit'>
+  readonly deployment: Deployment
+  gitlabReady(): boolean
   /** Durable effect queue through which launches and input deliveries run. */
   readonly effects: Pick<Effects, 'enqueue' | 'handle'>
   /** The `worker` health entry, which reports whether background worker event handling failed. */
@@ -431,8 +436,34 @@ export class DshExecutor implements Executor {
     const source = sourceTrigger(this.host, ticket)
     const workspace = ticket.execution?.directory ?? ''
     if (!current()) return
-    // Prepare the workspace directory once; an existing directory counts as already prepared, including worktrees created before `prepare` commands existed.
-    if (!await stat(workspace).then(() => true, () => false)) {
+    const snapshot = this.host.store.get(KV.ticketRepository(ticket.id))
+    if (!canUseTicketRepository(snapshot, this.host.deployment, this.host.store.get(KV.legacy.repositoryChanged) === true)) {
+      throw new PrepareFailed('The ticket repository identity does not match or cannot be verified; refusing to launch')
+    }
+    if (this.host.deployment.provider === 'gitlab') {
+      if (!snapshot || snapshot.provider !== 'gitlab') throw new PrepareFailed('The ticket has no fixed GitLab repository context; refusing to launch')
+      if (!this.host.gitlabReady()) throw new PrepareFailed('The GitLab Source is not enabled; refusing to launch without MR monitoring')
+      if (source?.source !== 'feishu') throw new PrepareFailed('GitLab tickets must originate from Feishu')
+      const signal = AbortSignal.any([this.host.lifetime, AbortSignal.timeout(PREPARE_TIMEOUT_MS)])
+      const git = (args: string[], cwd: string) => runAsWorker(this.host.context.subprocess, ['git', ...args], cwd, signal)
+      try {
+        if (!await stat(workspace).then(() => true, () => false)) {
+          await prepareGitlabWorkspace(snapshot, workspace, git, saved => {
+            if (!current()) throw new Error('Ticket changed during workspace preparation')
+            this.host.store.set(KV.ticketRepository(ticket.id), saved)
+          })
+        }
+        if (!current()) return
+        await verifyDirectory(workspace, this.host.context.subprocess, signal)
+        const saved = this.host.store.get(KV.ticketRepository(ticket.id))
+        if (!saved || saved.provider !== 'gitlab') throw new Error('Ticket base was not saved')
+        await verifyGitlabWorkspace(saved, workspace, git)
+      } catch (error) {
+        if (this.host.closing() || error instanceof Later) throw error
+        throw new PrepareFailed('GitLab workspace preparation or verification failed; inspect the Ticket directory and repository access')
+      }
+    } else if (!await stat(workspace).then(() => true, () => false)) {
+      // An existing GitHub directory counts as already prepared, including worktrees created before prepare commands existed.
       await this.prepareDirectory(ticket)
       if (!current()) return
     }

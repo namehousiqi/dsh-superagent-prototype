@@ -4,6 +4,7 @@ import { UserError } from '../src/core/index.ts'
 import { Commands } from '../src/infra/commands.ts'
 import { Setup } from '../src/app/setup.ts'
 import { SettingsConflict } from '../src/app/settings.ts'
+import { KV } from '../src/kv.ts'
 import { startRuntime, type Host } from './fixtures/host.ts'
 
 let h: Host | undefined
@@ -39,6 +40,19 @@ it('refuses a save of a block that another save changed during its model or acco
   accounts.resolve()
   await expect(moved).rejects.toThrow(SettingsConflict)
   expect(store.settings().sources.github!.config).toMatchObject({ cli: value.config.cli, pollSeconds: 90 })
+})
+
+it('marks legacy Ticket identities unsafe when a configured repository is changed', async () => {
+  h = await startRuntime()
+  const { settings, store } = h.runtime
+  vi.spyOn(Setup.prototype, 'checkAccounts').mockResolvedValue()
+  vi.spyOn(Setup.prototype, 'restart').mockImplementation(() => {})
+  const block = settings.block('source:github')
+  const value = block.value as { enabled: boolean; config: Record<string, unknown> }
+  expect(value.config.repository).toBeTruthy()
+  await settings.save('source:github', { ...value, config: { ...value.config, repository: 'other/project' } }, block.revision, 'panel')
+  expect(store.get(KV.legacy.repositoryChanged)).toBe(true)
+  expect(store.settings().sources.github?.config.repository).toBe('other/project')
 })
 
 it('refuses a Policy sync that a Policy save outran, reports it on sync:feishu, and keeps the save', async () => {

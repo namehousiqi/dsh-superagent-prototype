@@ -2,6 +2,7 @@
 import { join } from 'node:path'
 import type { Ticket, Trigger } from '../core/index.ts'
 import type { Deployment } from '../deployment.ts'
+import type { TicketRepository } from './ticket-repository.ts'
 import type { Settings } from '../policy.ts'
 import type { Localized, VariableSpec } from '../sources/kind.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
@@ -36,10 +37,17 @@ export function environmentOf(input: { deployment: Deployment; sources: SourceRe
 }
 
 /** Combines a ticket's fixed directory, name, and origin trigger with the deployment's current settings. */
-export function ticketEnvironment(input: { deployment: Deployment; sources: SourceRegistry; settings: Settings; ticket: Ticket; trigger?: Trigger }) {
-  const { ticket, trigger, ...rest } = input
+export function ticketEnvironment(input: { deployment: Deployment; sources: SourceRegistry; settings: Settings; ticket: Ticket; trigger?: Trigger; repository?: TicketRepository }) {
+  const { ticket, trigger, repository, ...rest } = input
   const values = { id: ticket.id, name: ticket.execution?.name ?? '', directory: ticket.execution?.directory ?? '' }
-  return environmentOf({ ...rest, ticket: values, ...trigger ? { trigger } : {} })
+  const variables = environmentOf({ ...rest, ticket: values, ...trigger ? { trigger } : {} })
+  if (repository?.provider === 'gitlab') {
+    const fixed: Record<string, string> = { DSH_SUPERAGENT_GITLAB_REPOSITORY: repository.cloneUrl, DSH_SUPERAGENT_GITLAB_BASE: repository.baseBranch,
+      DSH_SUPERAGENT_GITLAB_TARGET: repository.targetBranch, DSH_SUPERAGENT_GITLAB_BRANCH: repository.featureBranch,
+      DSH_SUPERAGENT_GITLAB_BASE_SHA: repository.baseSha ?? '' }
+    return variables.map(variable => variable.key in fixed ? { ...variable, value: fixed[variable.key]! } : variable)
+  }
+  return variables
 }
 export function environmentLines(variables: Variable[]): string {
   return variables.map(variable => `- ${variable.key} = ${JSON.stringify(variable.value)}: ${variable.description.en}.`).join('\n')

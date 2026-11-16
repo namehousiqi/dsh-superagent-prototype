@@ -279,17 +279,28 @@ Some generic modules still refer directly to GitHub or Feishu:
 - Outbox applies the Feishu chat word limit.
 - `src/app/links.ts` resolves Feishu message links and `repliedTo`. It and Runtime read settings with `feishuSettings`.
 - `src/app/resources.ts` reads the `feishu/` and `github/` originals; `src/app/cards.ts` uses `pullOf` for Ticket cards.
-- Runtime sends `pullEndNotices` for merged or closed Tickets.
-- Executor tools bind reported pull requests with `readPull` and `claimPull`, using the GitHub context exposed by Runtime.
-- MasterAssessor reads repository files with `readRepositoryPath`.
-- Sessions and Prompts register built-in skills only for GitHub and Feishu. Migration converts their schema-10 records.
-- Setup probes only GitHub and Feishu account fields (`SETUP_FIELDS`). Only those Sources receive account setup problems through `SourceContext.problem`.
+- Runtime sends `pullEndNotices` or `mergeEndNotices` for merged or closed Tickets.
+- Executor tools bind GitHub pull requests through `readPull` and `claimPull`, or publish and bind GitLab merge requests through `GitlabPublisher`.
+- MasterAssessor reads GitHub files on its default branch or GitLab files on the configured development base branch.
+- Sessions and Prompts register built-in skills only for GitHub and Feishu; GitLab workers also receive mandatory GitLab-specific instructions. Migration converts their schema-10 records.
+- Setup probes the selected GitHub or GitLab account fields and the Feishu account fields (`SETUP_FIELDS`).
 
 
 ## Modules
 
 | Path | Responsibility |
 | --- | --- |
+| `src/app/ticket-repository.ts` | Immutable Ticket repository identity, branch and base snapshot |
+| `src/executor/gitlab-workspace.ts` | Prepare and verify a Ticket's fixed GitLab workspace |
+| `src/executor/gitlab-push.ts` | Guarded feature-branch publication and interrupted-push reconciliation |
+| `src/executor/gitlab-publish.ts` | Publish and bind the verified GitLab MR for a live Feishu Ticket |
+| `src/sources/gitlab.ts` | GitLab source configuration and bound-MR polling entry |
+| `src/sources/gitlab-merge.ts` | Scoped MR discovery, creation and identity verification |
+| `src/sources/gitlab-channel.ts` | Deliver idempotent replies only to a Ticket's verified MR and discussion |
+| `src/sources/gitlab-events.ts` | MR note and CI trigger normalization |
+| `src/sources/gitlab-poll.ts` | Bound MR comments, pipelines and terminal-state polling |
+| `src/sources/gitlab-read.ts` | Read-only assessment files and directory listings on the configured base branch |
+| `src/sources/gitlab-pull.ts` | Associate MRs with Tickets and produce end notices |
 | `src/index.ts` | The main plugin entry: reads the machine settings, starts the Runtime, and gives it the restart that a save of a Source's account uses |
 | `src/deployment.ts` | The plugin `Config` and `Machine`; `resolveDeployment` and `resolveFeishuBot` read the repository and the accounts from the Source settings, each CLI run as Executor shells run it; `SETUP_FIELDS` lists the Source fields setup reads. The code names no person, account or organization |
 | `src/setup.ts` | Setup problems: `SetupError`, with a code, the place that fixes it and the English text the log, the main Session and the panel share |
@@ -397,12 +408,17 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/client/locales.ts` | All copy in both languages, and the glossary of [001 Domain model](001-domain.md) |
 | `src/client/client.css`, `css.d.ts` | The panel's stylesheet, loaded as text |
 
-`src/sources/github.ts` and `src/sources/feishu.ts` are also the entries of the two Source plugins, built by `tsdown.config.ts` and exported in `package.json` as `./github-watch` and `./feishu-watch`. The bundle's `cordis.patch.yml` inserts the three plugins, with Feishu disabled.
+`src/sources/github.ts`, `src/sources/gitlab.ts` and `src/sources/feishu.ts` are Source plugin entries, built by `tsdown.config.ts` and exported in `package.json` as `./github-watch`, `./gitlab-watch` and `./feishu-watch`. The bundle's `cordis.patch.yml` inserts the orchestrator and all three Source plugins, with Feishu disabled.
 
 ## Tests
 
 | Test | Covers |
 | --- | --- |
+| `tests/gitlab-commands.spec.ts`, `tests/gitlab-environment.spec.ts`, `tests/ticket-repository.spec.ts` | Scoped commands, fixed environment and repository snapshots |
+| `tests/gitlab-channel.spec.ts`, `tests/gitlab-events.spec.ts`, `tests/gitlab-poll.spec.ts`, `tests/gitlab-pull.spec.ts` | MR replies, events, bound polling and Ticket association |
+| `tests/gitlab-read.spec.ts` | GitLab base-branch source reads, pagination and path restrictions |
+| `tests/gitlab-runtime.spec.ts` | Simulated Feishu-to-GitLab Ticket, MR events and terminal notice integration |
+| `tests/gitlab-merge.spec.ts`, `tests/gitlab-publish.spec.ts`, `tests/gitlab-workspace.spec.ts` | MR verification, publication and isolated branch workspaces |
 | `tests/core-engine.spec.ts` | Domain rules on in-memory repositories: receiving, Eval, fan-out, resume and stop, interrupted Assignments, the pause, Policy changes, reports and outcomes, attaching, replies, failed deliveries and dismissed problems |
 | `tests/stage.spec.ts` | The Ticket stages, row by row |
 | `tests/policy.spec.ts` | Source scope, the gate, the admission table, Mandate revalidation, the Policy version, settings migrations and assessment outcomes |

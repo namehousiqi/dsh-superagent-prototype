@@ -1254,6 +1254,18 @@ it('rereads a Source\'s display names on request, reports the new ones and keeps
   await expect(runtime.settings.refreshLabels('github')).rejects.toThrow('no names to refresh')
 })
 
+it('accepts a null chat list as empty while preserving labels on malformed responses', async () => {
+  runtime.store.set('source-labels:feishu', { oc_team: 'Team' })
+  const lark = vi.spyOn(Commands.prototype, 'lark').mockResolvedValueOnce({ chats: null, has_more: false })
+  expect(await api('POST', 'sources/feishu/labels')).toEqual({ status: 200, body: { added: [] } })
+  expect(runtime.store.get('source-labels:feishu')).toEqual({})
+
+  runtime.store.set('source-labels:feishu', { oc_team: 'Team' })
+  lark.mockResolvedValueOnce({ chats: {} })
+  expect((await api('POST', 'sources/feishu/labels')).status).toBe(400)
+  expect(runtime.store.get('source-labels:feishu')).toEqual({ oc_team: 'Team' })
+})
+
 it('drops a message only when its conversation is gone or not listened to, newest drop first, and keeps it while its Source is off', async () => {
   const channel = feishu('7', 'x').channel!
   // Messages of no Ticket keep no order, so none waits behind another.

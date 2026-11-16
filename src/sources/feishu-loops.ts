@@ -107,7 +107,8 @@ async function consume(ctx: SourceContext, signal: AbortSignal): Promise<void> {
 /** Refreshes the map of joined chats (`chat_id -> name`); throws on failure so the previously stored list remains intact. */
 export async function refreshChatNames(ctx: SourceContext, signal?: AbortSignal): Promise<Record<string, string>> {
   const commands = ctx.commands.withSignal(signal)
-  const result = z.looseObject({ chats: z.array(z.looseObject({ chat_id: z.string(), name: z.string().nullish() })).optional() })
+  // lark-cli returns `chats: null` when the bot has not joined any groups.
+  const result = z.looseObject({ chats: z.array(z.looseObject({ chat_id: z.string(), name: z.string().nullish() })).nullish() })
     .parse(await commands.lark(['im', '+chat-list', '--page-all', '--page-size', '100']))
   const names = Object.fromEntries((result.chats ?? []).filter(chat => chat.name).map(chat => [chat.chat_id, chat.name!]))
   ctx.state.set(KV.sources.labels(SOURCE), names)

@@ -53,11 +53,22 @@ it('saves the Eval block on the Policy settings and the Executor with its execut
     'worker-model'); await type(effort as HTMLInputElement, 'high')
   expect([...document.querySelectorAll('#dt-worker-model-efforts option')].map(option => option.getAttribute('value'))).toEqual(['high'])
   await click(zh.save)
-  expect(server.settings.executor).toEqual({ maxWorkers: 5, directory: '/srv/work',
+  expect(server.settings.executor).toEqual({ maxWorkers: 5, directory: '/srv/work', repositorySource: 'github',
     prepare: 'git worktree add "$DSH_SUPERAGENT_DIR"', blockedCommands: ['gh-personal', 'gh.other'], model: { provider: 'worker-provider',
       model: 'worker-model', reasoningEffort: 'high' } })
   expect(server.requests.filter(request => request.method === 'PUT').map(request => request.path)).toEqual(['settings/eval',
     'settings/executor'])
+})
+
+it('selects GitLab as the execution repository provider', async () => {
+  server.includeGitlab = true
+  await mount()
+  await click(zh['tab.execution'])
+  await click(find(zh['tab.settings'], '.dt-status-head button'))
+  expect(server.settings.executor.repositorySource).toBe('github')
+  await click('GitLab')
+  await click(zh.save)
+  expect(server.settings.executor.repositorySource).toBe('gitlab')
 })
 
 it('loads configuration history on demand with localized changes, Source field labels and notified Tickets', async () => {

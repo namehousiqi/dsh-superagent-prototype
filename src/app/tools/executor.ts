@@ -17,6 +17,7 @@ export interface ExecutorToolsHost {
   readonly resources: ResourceHost
   /** GitHub Source context whose pull-request rules govern claiming a reported PR. */
   readonly github: SourceContext
+  publishGitlab(ticketId: string, title: string, description: string, signal?: AbortSignal): Promise<unknown>
   sendReplies(): Promise<void>
 }
 
@@ -71,6 +72,12 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
       }).strict(),
       execute: async args => ({ trigger_id: args.trigger_id, queued: host.engine.handback(ticketId, args.trigger_id, args.reason) }),
     }),
+    ...(host.github.deployment.provider === 'gitlab' ? [tool({
+      name: 'orchestrator_gitlab_publish',
+      description: 'For a GitLab Ticket, publish its committed feature branch and create or reuse its merge request. Never push or merge manually. Inspect the complete MR diff, particularly when the development base and target differ.',
+      schema: z.object({ title: z.string().trim().min(1).max(255), description: z.string().max(20_000) }).strict(),
+      execute: async (args, signal) => host.publishGitlab(ticketId, args.title, args.description, signal),
+    })] : []),
     tool({
       name: 'orchestrator_report',
       description: 'Report progress, ready, blocked, failed or dropped, as the work and handoff sections say.',
@@ -79,7 +86,7 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
         summary: z.string().min(1),
         human_action: z.string().trim().min(1).max(1000).nullish().describe('One concrete question for a person, also with state=progress; omit to keep the pending one, null to clear it.'),
         question_for_trigger_id: z.string().optional().describe('With human_action: the human message that raised the question, which is asked where that person wrote.'),
-        pr_number: z.number().int().positive().nullish().describe(`The ticket's PR: its source PR, or one by ${host.github.deployment.github.login} from a branch named after this ticket (DSH_SUPERAGENT_NAME).`),
+        pr_number: z.number().int().positive().nullish().describe('The GitHub PR: its source PR or one opened by the configured GitHub agent from this ticket branch.'),
         reply_to_trigger_id: z.string().optional().describe('The explicit human question this report answers; never for ordinary progress.'),
       }).strict(),
       execute: async (args, signal) => {
